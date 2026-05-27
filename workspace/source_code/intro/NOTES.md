@@ -36,12 +36,31 @@ Also tested (all within ~3 ms of clean):
 - per-sample Python loop on GPU
 - Same on TinyCNN (where CPU prep becomes the bottleneck and CPU sync still doesn't matter)
 
+## Revised structure (decided 2026-05-27)
+
+Drop the single-script-three-versions plan. New structure is **two training scripts, four files total**:
+
+1. **`train_v1.py`** — original training task. Has Bug 1 (DataLoader stall).
+2. **`train_v1_fixed.py`** — Bug 1 fixed.
+3. **`train_v2.py`** — *new, more ambitious training task* enabled by the v1 fix. Has Bug 2.
+4. **`train_v2_fixed.py`** — Bug 2 fixed.
+
+Pedagogical arc: "Once we fix the data-loading stall, we can take on a more ambitious training problem — and that bigger problem surfaces a new class of bug that PyTorch Profiler can hint at but Nsight Systems makes obvious."
+
+This frees Bug 2 from having to live inside the simple CIFAR-10 + ResNet18 + 32×32 setup that was empirically shown to hide CPU-side sync bugs. The v2 task can scale up image size, model, batch size, or introduce mixed precision / autograd-anomaly / per-step eval — whatever combination produces a clean profiler-vs-nsys contrast.
+
 ## What to do next (paused here)
 
-Bug 2 needs to be **GPU-cost on the critical path**, not a CPU-side sync. Candidates listed in task #6:
-1. `torch.autograd.set_detect_anomaly(True)` left enabled (~30% overhead)
-2. Per-step eval forward on a held-out batch
-3. Unused auxiliary head computed every forward
-4. cudnn benchmark off with varying input shapes
-
-Once Bug 2 is chosen and verified, update v1 and v2 accordingly, remove the misleading `non_blocking` framing from script docstrings, and proceed to writing the two intro notebooks.
+1. **Decide the v2 training task**: how to scale up from CIFAR-10 + ResNet18 + 32×32. Options to weigh: larger images (128/224), bigger model (ResNet50d, ViT-S), mixed precision, longer schedule, larger batch. Pick something that opens up a Bug 2 with clear timeline-vs-profiler contrast.
+2. **Pick Bug 2** to live in the v2 task. Candidates worth trying:
+   - `torch.autograd.set_detect_anomaly(True)` left enabled (~30% overhead, very real bug)
+   - Per-step eval forward on a held-out batch (extra GPU work between train steps)
+   - Unused auxiliary head computed every forward (extra GPU kernels on critical path)
+   - cudnn benchmark off with varying input shapes (algo search per shape change)
+   - Now that the workload is heavier, `non_blocking` / `.item()` could become visible — re-test before discarding
+3. **Rename / restructure** existing files:
+   - `train_v0_baseline.py` → `train_v1.py`
+   - `train_v1_dataloader_fixed.py` → `train_v1_fixed.py`
+   - Delete `train_v2_fully_fixed.py` (replaced by the two new v2 files once designed)
+4. **Re-verify** the v1 → v1_fixed and v2 → v2_fixed deltas show on this hardware.
+5. **Then** write the two intro notebooks (PyTorch Profiler intro on the v1 pair, Nsight Systems intro on the v2 pair).

@@ -11,15 +11,20 @@
 
 - **Training task**: CIFAR-10 + ResNet18 at native 32x32, single GPU, fixed seed, short enough that the profile-fix-reprofile loop is snappy.
 
-- **Three script versions** (all in `workspace/source_code/intro/`):
-  - **(a) `train_v0_baseline.py`** — both bugs present: `num_workers=0`, `pin_memory=False`, `.to(device)` without `non_blocking`. Expected: significant per-step idle gaps; profiler shows DataLoader dominating.
-  - **(b) `train_v1_dataloader_fixed.py`** — DataLoader fix applied: `num_workers=N`, `pin_memory=True`. Still missing `non_blocking=True`, so H2D still serializes. Expected: profiler now looks "clean" but GPU timeline still has gaps under nsys.
-  - **(c) `train_v2_fully_fixed.py`** — both fixes applied. Expected: GPU timeline shows H2D overlapping with prior step's compute.
+- **Script structure** (revised 2026-05-27 — see `workspace/source_code/intro/NOTES.md`): **two training tasks, four files**, in `workspace/source_code/intro/`:
+  - **(a) `train_v1.py`** — original training task (CIFAR-10 + ResNet18 32×32). Has Bug 1 (DataLoader stall).
+  - **(b) `train_v1_fixed.py`** — Bug 1 fixed (`num_workers=N`, `pin_memory=True`).
+  - **(c) `train_v2.py`** — *new, more ambitious training task* enabled by the v1 fix (heavier model / images / mixed precision / etc., TBD). Has Bug 2.
+  - **(d) `train_v2_fixed.py`** — Bug 2 fixed.
+
+  Pedagogical arc: fixing the data-loading stall unlocks a more ambitious training problem, which in turn surfaces a new class of bug that needs the timeline view to diagnose. Frees Bug 2 from having to live inside the GPU-bound CIFAR/ResNet18 32×32 workload where CPU-side bugs were shown to be invisible.
 
 - **Substeps (do in order)**:
-  - **(a) Create the three scripts** — DONE for original plan, but Bug 2 (`non_blocking`) was empirically shown to have no observable wallclock impact at any tested image size (32/128/224) on L4. CPU-side bugs in general are invisible because ResNet18 saturates the GPU. See `workspace/source_code/intro/NOTES.md` for the full diagnostic.
-  - **(a.1) Pick a new Bug 2 that has direct GPU-side cost on the critical path** — see task #6. Candidates: leftover `autograd.set_detect_anomaly(True)`, per-step eval pass, unused aux head, cudnn-benchmark issues. Once chosen, regenerate v1/v2 scripts and re-verify.
-  - **(a.2) Re-verify the three scripts** show the expected v0 / v1 / v2 progression.
+  - **(a) v1 pair done** (currently named `train_v0_baseline.py` and `train_v1_dataloader_fixed.py`; rename to `train_v1.py` / `train_v1_fixed.py`). Verified on L4: 256.8 → 93.7 ms/step. DataLoader stall reproduces clearly.
+  - **(a.1) Design the v2 training task**: pick a more ambitious training scenario (larger images / bigger model / mixed precision / etc.) that the v1 fix makes feasible AND that creates headroom for Bug 2 to be visible.
+  - **(a.2) Pick Bug 2** for the v2 task — see task #6. Candidates: leftover `autograd.set_detect_anomaly(True)`, per-step eval pass, unused aux head, cudnn-benchmark issues. With a heavier workload, also re-test `non_blocking` / `.item()` before discarding.
+  - **(a.3) Write `train_v2.py` and `train_v2_fixed.py`**; delete the now-misleading `train_v2_fully_fixed.py`.
+  - **(a.4) Re-verify** all four scripts show the expected progression on this single L4.
   - **(b) Notebook 1 — `pytorch-profiler-intro.ipynb`**: Run v0 under `torch.profiler.profile()` with `tensorboard_trace_handler`, point to TensorBoard at `:8889`, walk through the section breakdown, derive the fix, rerun on v1 to show the win.
   - **(c) Notebook 2 — `nsight-systems-intro.ipynb`**: Try profiler on v1 — looks fine but GPU is still idle. Run nsys, open the timeline, see the H2D sawtooth, derive the fix, rerun on v2.
   - **(d) Wire into TOC**: Place both ahead of the existing `nsys-introduction.ipynb`. Decide whether `nsys-introduction.ipynb` becomes a deeper-dive or is folded into Notebook 2.
