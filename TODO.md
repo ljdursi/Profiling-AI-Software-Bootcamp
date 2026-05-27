@@ -2,29 +2,35 @@
 
 ## Tomorrow's Priority Tasks
 
-### 1. PyTorch Profiler Integration (shapes downstream notebook work)
-- **Goal**: Introduce PyTorch's native profiling alongside the existing nsys + manual NVTX workflow, so students see the recommended three-level funnel (PyTorch Profiler → Nsight Systems → Nsight Compute) instead of only the middle layer.
-- **Why early**: Decisions made here (which notebook is the entry point, whether `emit_nvtx()` stays, whether manual NVTX ranges get replaced by `--pytorch=autograd-nvtx`) ripple through every later notebook edit.
+### 1. New Introductory Notebooks: PyTorch Profiler → Nsight Systems via a Two-Bug Demo
+**Branch**: `introductory-notebooks`
 
-- **Current state (audited 2026-05-22)**:
-  - Manual `torch.cuda.nvtx.range_push/range_pop` in `source_code/baseline.py`, `ddp_optimize.py`, `fp8/te_transformer_layer_fp8.py`, `fp8/te_unfused_attn_fp8.py`.
-  - One vestigial `torch.autograd.profiler.emit_nvtx()` wrapping the training loop in `baseline.py`; not used elsewhere.
-  - **Zero** uses of `torch.profiler.profile()`, `torch_tb_profiler`, or `nsys profile --pytorch=autograd-nvtx` anywhere — despite `torch_tb_profiler` being pre-installed in the container.
+- **Pedagogical goal**: Two short notebooks at the *start* of the workshop that teach when to reach for each tool by solving two bugs in one training script:
+  - **Notebook 1 — PyTorch Profiler**: A `DataLoader` stall (caused by `num_workers=0, pin_memory=False`). The profiler's step view shows the `DataLoader` section dominating each step; fix is 3 lines. Pedagogical message: "profiler told you the section, you fix the section."
+  - **Notebook 2 — Nsight Systems**: H2D copies not overlapping with compute (caused by `.to(device)` without `non_blocking=True`). PyTorch Profiler shows time in `Memcpy HtoD` but doesn't make the *serialization* obvious. Nsys' timeline shows a sawtooth where H2D sits between kernels instead of underneath them. Fix: `non_blocking=True`. Pedagogical message: "you need the timeline view to see *concurrency* problems."
+
+- **Training task**: CIFAR-10 + ResNet18 at native 32x32, single GPU, fixed seed, short enough that the profile-fix-reprofile loop is snappy.
+
+- **Three script versions** (all in `workspace/source_code/intro/`):
+  - **(a) `train_v0_baseline.py`** — both bugs present: `num_workers=0`, `pin_memory=False`, `.to(device)` without `non_blocking`. Expected: significant per-step idle gaps; profiler shows DataLoader dominating.
+  - **(b) `train_v1_dataloader_fixed.py`** — DataLoader fix applied: `num_workers=N`, `pin_memory=True`. Still missing `non_blocking=True`, so H2D still serializes. Expected: profiler now looks "clean" but GPU timeline still has gaps under nsys.
+  - **(c) `train_v2_fully_fixed.py`** — both fixes applied. Expected: GPU timeline shows H2D overlapping with prior step's compute.
 
 - **Substeps (do in order)**:
-  - **(a) Entry-point notebook**: Pick where students first meet PyTorch Profiler. Candidates: add cells to existing `nsys-introduction.ipynb` (currently markdown-only — good blank canvas) *or* create a new `pytorch-profiler-intro.ipynb` ahead of `nsys-introduction` in the TOC. Decide which before writing any code.
-  - **(b) Instrument `baseline.py` with `torch.profiler`**: Add a `torch.profiler.profile()` context with `tensorboard_trace_handler(logdir='/workspace/logs')`. baseline.py is simplest and already has manual NVTX, so students can compare the two views side-by-side. Add a notebook cell that runs it and points students to TensorBoard at `:8889`.
-  - **(c) Auto-NVTX via nsys on `ddp_optimize.py`**: Remove the manual `nvtx.range_push/pop` lines, profile via `nsys profile --pytorch=autograd-nvtx --trace=cuda,osrt,nvtx …`. Compare timelines with the manual-NVTX version (`ddp-baseline_nvtx.py`) in a notebook cell to show what auto-annotation produces vs hand-curated ranges.
-  - **(d) Combined cell**: In `nsys-application.ipynb` (or a new lab), run a training step under *both* `torch.profiler.profile()` *and* `nsys profile --pytorch=autograd-nvtx` simultaneously. Demonstrates the three-level funnel concretely on one training script.
-  - **(e) Decide fate of `emit_nvtx()`**: With `--pytorch=autograd-nvtx` providing automatic PyTorch-op NVTX from nsys' side, the `emit_nvtx()` context in `baseline.py` is largely redundant. Either remove it and rely on the nsys flag, or keep it as a "here's the in-process equivalent" teaching moment. Pick one and document the reasoning.
+  - **(a) Create the three scripts** — DONE for original plan, but Bug 2 (`non_blocking`) was empirically shown to have no observable wallclock impact at any tested image size (32/128/224) on L4. CPU-side bugs in general are invisible because ResNet18 saturates the GPU. See `workspace/source_code/intro/NOTES.md` for the full diagnostic.
+  - **(a.1) Pick a new Bug 2 that has direct GPU-side cost on the critical path** — see task #6. Candidates: leftover `autograd.set_detect_anomaly(True)`, per-step eval pass, unused aux head, cudnn-benchmark issues. Once chosen, regenerate v1/v2 scripts and re-verify.
+  - **(a.2) Re-verify the three scripts** show the expected v0 / v1 / v2 progression.
+  - **(b) Notebook 1 — `pytorch-profiler-intro.ipynb`**: Run v0 under `torch.profiler.profile()` with `tensorboard_trace_handler`, point to TensorBoard at `:8889`, walk through the section breakdown, derive the fix, rerun on v1 to show the win.
+  - **(c) Notebook 2 — `nsight-systems-intro.ipynb`**: Try profiler on v1 — looks fine but GPU is still idle. Run nsys, open the timeline, see the H2D sawtooth, derive the fix, rerun on v2.
+  - **(d) Wire into TOC**: Place both ahead of the existing `nsys-introduction.ipynb`. Decide whether `nsys-introduction.ipynb` becomes a deeper-dive or is folded into Notebook 2.
+  - **(e) Decide fate of `emit_nvtx()` in `baseline.py`**: defer until after intros are written — its role depends on how Notebook 2 lands.
 
 - **Components reference**:
   - `torch_tb_profiler`: pre-installed; TensorBoard already auto-starts in the container on port 8889.
   - `torch.profiler.profile()` + `tensorboard_trace_handler`: macro-level per-step timing, view in TensorBoard.
   - `nsys profile --pytorch=autograd-nvtx`: nsys flag that auto-emits NVTX ranges for PyTorch ops; no code changes required.
-  - `torch.autograd.profiler.emit_nvtx()`: in-process equivalent of the above; older API.
 
-- **Workflow**: PyTorch Profiler (which step is slow?) → Nsight Systems (root cause: I/O? sync?) → Nsight Compute (kernel details)
+- **Workflow**: PyTorch Profiler (which section is slow?) → Nsight Systems (concurrency, kernel launch, sync issues) → Nsight Compute (kernel internals)
 
 - **Resources**:
   - [PyTorch Profiler with TensorBoard Tutorial](https://docs.pytorch.org/tutorials/intermediate/tensorboard_profiler_tutorial.html)
