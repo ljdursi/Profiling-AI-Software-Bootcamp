@@ -1,66 +1,66 @@
-# Intro-Notebook Scripts: Design Notes & Pause State
+# Intro-Notebook Scripts: Design Notes
 
-## What's here
+## Final script inventory
 
-Three scripts implementing the original "DataLoader → non_blocking" two-bug plan:
-- `train_v0_baseline.py` — both bugs present
-- `train_v1_dataloader_fixed.py` — DataLoader fixed, `.to(device)` still synchronous
-- `train_v2_fully_fixed.py` — both fixed (uses `non_blocking=True`)
+| File | Task | Bug | Status |
+|------|------|-----|--------|
+| `train_v1.py` | CIFAR-10 + ResNet18 FP32 | Bug 1: DataLoader stall (`num_workers=0`, `pin_memory=False`) | Verified |
+| `train_v1_fixed.py` | Same | Bug 1 fixed (`num_workers=4`, `pin_memory=True`) | Verified |
+| `train_v2.py` | CIFAR-10 + ResNet18 AMP | Bug 2: `set_detect_anomaly(True)` left on | Verified |
+| `train_v2_fixed.py` | Same | Bug 2 fixed (flag removed) | Verified |
 
-All three use CIFAR-10 + adapted ResNet18 (3×3 stride-1 stem, no maxpool) at native 32×32, batch 256, 60 iterations w/ 5 warmup, NVTX ranges, optional `--profile` flag for `torch.profiler` traces to `/workspace/logs/<script>/`.
+## Measured performance on this instance (1× L4, batch=256)
 
-## Measured behavior on this instance (1× L4)
+| Script | Mean step | Throughput | Note |
+|--------|-----------|------------|------|
+| train_v1 | ~261 ms | ~981 img/s | DataLoader stall dominates |
+| train_v1_fixed | ~94 ms | ~2730 img/s | 2.8× win from fixing DataLoader |
+| train_v2 | ~65 ms | ~3960 img/s | AMP + bug: only 1.45× over v1_fixed |
+| train_v2_fixed | ~47 ms | ~5450 img/s | 2× over v1_fixed — AMP working |
 
-| script | mean step | throughput |
-| --- | --- | --- |
-| v0 | 256.8 ms | 997 img/s |
-| v1 | 93.7 ms  | 2727 img/s |
-| v2 | 93.9 ms  | 2727 img/s |
+## Pedagogical arc
 
-- **v0 → v1**: dramatic (2.7×), DataLoader stall reproduces as planned.
-- **v1 → v2**: **invisible**. `non_blocking=True` does not move wallclock at this scale.
+1. **Notebook 1 (PyTorch Profiler)** — v1 → v1_fixed.
+   Profile v1: the step view shows `DataLoader` dominating every step.  Fix
+   is two lines (`num_workers`, `pin_memory`).  Profile v1_fixed to confirm.
+   Message: *"The profiler tells you which section is slow; you fix that section."*
 
-## Why Bug 2 (non_blocking) doesn't show
+2. **Notebook 2 (Nsight Systems)** — v2 → v2_fixed.
+   Profile v2 with the PyTorch Profiler: step time improved vs v1_fixed but
+   AMP delivers only 1.45× instead of the expected ~2×.  The profiler shows
+   `backward` is much longer than a clean AMP run; it doesn't say why.
+   Run nsys on v2: inside the `backward` NVTX range the GPU timeline is a
+   sawtooth — each layer's gradient kernel fires then the GPU idles while
+   the CPU checks that gradient for NaN, then the next layer starts.
+   ~60 syncs per step, one per backward op.  Fix: remove `set_detect_anomaly`.
+   Profile v2_fixed with nsys to confirm the sawtooth is gone.
+   Message: *"The profiler shows you WHERE time goes; nsys shows you WHY —
+   especially concurrency and synchronisation problems invisible in a
+   step-level view."*
 
-Empirically tested at:
-- 32×32 batch 256 (3 MB H2D): no change
-- 128×128 batch 256 (50 MB H2D): no change
-- 224×224 batch 128 (77 MB H2D): no change
+## Why set_detect_anomaly instead of non_blocking
 
-Root cause: on L4, ResNet18 is GPU-bound enough that the CPU prep (data load + H2D + enqueue) happily fits inside the GPU compute window. Saving the few ms of CPU-side blocking on H2D has zero throughput effect because the CPU wasn't on the critical path anyway.
+The original Bug 2 was `.to(device)` without `non_blocking=True`.  Empirically
+tested on the bootcamp instance (1× L4): no measurable wallclock difference at
+any of 32×32, 128×128, 224×224 with batch 256.  ResNet18 keeps the GPU busy
+enough that CPU prep fits inside the GPU compute window.
 
-Also tested (all within ~3 ms of clean):
-- `loss.item()` per step
-- `torch.cuda.synchronize()` per step
-- `logits.cpu() + y.cpu()` per step for metric
-- per-sample Python loop on GPU
-- Same on TinyCNN (where CPU prep becomes the bottleneck and CPU sync still doesn't matter)
+`set_detect_anomaly(True)` was chosen as a replacement after an empirical
+search (`v2_bakeoff.py`).  Key findings:
 
-## Revised structure (decided 2026-05-27)
+- Anomaly detection overhead is ~22 ms/step (batch-size independent — it
+  scales with backward op count, not data volume).
+- At batch=256 AMP, this yields +38% overhead (65 ms buggy vs 47 ms clean).
+- At smaller batches the relative overhead is larger (100–183% at batch 64–128),
+  because the same absolute overhead lands on a shorter step.
+- Per-step `.item()` calls hit a ceiling of ~10% overhead on L4 even with
+  multiple calls — subsequent syncs are free after the first one.
 
-Drop the single-script-three-versions plan. New structure is **two training scripts, four files total**:
+## Realistic bug scenario
 
-1. **`train_v1.py`** — original training task. Has Bug 1 (DataLoader stall).
-2. **`train_v1_fixed.py`** — Bug 1 fixed.
-3. **`train_v2.py`** — *new, more ambitious training task* enabled by the v1 fix. Has Bug 2.
-4. **`train_v2_fixed.py`** — Bug 2 fixed.
-
-Pedagogical arc: "Once we fix the data-loading stall, we can take on a more ambitious training problem — and that bigger problem surfaces a new class of bug that PyTorch Profiler can hint at but Nsight Systems makes obvious."
-
-This frees Bug 2 from having to live inside the simple CIFAR-10 + ResNet18 + 32×32 setup that was empirically shown to hide CPU-side sync bugs. The v2 task can scale up image size, model, batch size, or introduce mixed precision / autograd-anomaly / per-step eval — whatever combination produces a clean profiler-vs-nsys contrast.
-
-## What to do next (paused here)
-
-1. **Decide the v2 training task**: how to scale up from CIFAR-10 + ResNet18 + 32×32. Options to weigh: larger images (128/224), bigger model (ResNet50d, ViT-S), mixed precision, longer schedule, larger batch. Pick something that opens up a Bug 2 with clear timeline-vs-profiler contrast.
-2. **Pick Bug 2** to live in the v2 task. Candidates worth trying:
-   - `torch.autograd.set_detect_anomaly(True)` left enabled (~30% overhead, very real bug)
-   - Per-step eval forward on a held-out batch (extra GPU work between train steps)
-   - Unused auxiliary head computed every forward (extra GPU kernels on critical path)
-   - cudnn benchmark off with varying input shapes (algo search per shape change)
-   - Now that the workload is heavier, `non_blocking` / `.item()` could become visible — re-test before discarding
-3. **Rename / restructure** existing files:
-   - `train_v0_baseline.py` → `train_v1.py`
-   - `train_v1_dataloader_fixed.py` → `train_v1_fixed.py`
-   - Delete `train_v2_fully_fixed.py` (replaced by the two new v2 files once designed)
-4. **Re-verify** the v1 → v1_fixed and v2 → v2_fixed deltas show on this hardware.
-5. **Then** write the two intro notebooks (PyTorch Profiler intro on the v1 pair, Nsight Systems intro on the v2 pair).
+Developer was debugging a NaN in gradients.  They added
+`torch.autograd.set_detect_anomaly(True)` at module level, found and fixed the
+NaN, then forgot to remove the flag.  Training kept working; it just became 38%
+slower.  With AMP in the picture the developer might attribute the
+underperformance to "AMP not helping on this model" rather than suspecting a
+leftover debug flag.

@@ -1,24 +1,21 @@
-"""Intro lab v2: both bugs fixed.
+"""Intro lab v1 (buggy): CIFAR-10 + ResNet18 FP32, single GPU.
 
-Diff vs v1_dataloader_fixed.py:
-    x = x.to(device)               -> x = x.to(device, non_blocking=True)
-    y = y.to(device)               -> y = y.to(device, non_blocking=True)
+Bug 1 (PyTorch Profiler will surface): DataLoader uses num_workers=0 and
+pin_memory=False, so every batch is decoded and augmented on the main thread
+before each step, stalling the GPU.  The profiler step view makes the
+DataLoader section impossible to miss; the fix is two lines.
 
-Expected behavior:
-    - Nsight Systems timeline shows the gap before each forward is closed:
-      the CPU returns from .to() immediately, queues the next forward, and the
-      GPU stays busy across step boundaries.
+Usage:
+    python train_v1.py      # plain run, prints step timings
 """
 
 import argparse
 import time
-from pathlib import Path
 
 import torch
 import torch.nn as nn
 import torchvision
 import torchvision.transforms as T
-from torch.cuda import nvtx
 from torch.utils.data import DataLoader
 
 SEED = 0
@@ -26,10 +23,10 @@ BATCH_SIZE = 256
 NUM_ITERS = 60
 WARMUP_ITERS = 5
 DATA_ROOT = "/workspace/data"
-LOG_ROOT = "/workspace/logs"
 
-NUM_WORKERS = 4
-PIN_MEMORY = True
+# Bug 1 lives here:
+NUM_WORKERS = 0
+PIN_MEMORY = False
 
 
 def build_loader():
@@ -61,7 +58,7 @@ def build_model(device):
     return model.to(device)
 
 
-def train(profile: bool):
+def train():
     torch.manual_seed(SEED)
     device = torch.device("cuda")
     loader = build_loader()
@@ -70,68 +67,24 @@ def train(profile: bool):
     loss_fn = nn.CrossEntropyLoss()
     model.train()
 
-    profiler_ctx = None
-    if profile:
-        script_name = Path(__file__).stem
-        logdir = Path(LOG_ROOT) / script_name
-        logdir.mkdir(parents=True, exist_ok=True)
-        profiler_ctx = torch.profiler.profile(
-            activities=[
-                torch.profiler.ProfilerActivity.CPU,
-                torch.profiler.ProfilerActivity.CUDA,
-            ],
-            schedule=torch.profiler.schedule(
-                wait=1, warmup=WARMUP_ITERS, active=10, repeat=1,
-            ),
-            on_trace_ready=torch.profiler.tensorboard_trace_handler(str(logdir)),
-            record_shapes=True,
-            with_stack=False,
-        )
-
     step_times = []
     loader_iter = iter(loader)
-    if profiler_ctx is not None:
-        profiler_ctx.__enter__()
 
     for step in range(NUM_ITERS):
         torch.cuda.synchronize()
         t0 = time.perf_counter()
 
-        nvtx.range_push("step")
-
-        nvtx.range_push("data_load")
         x, y = next(loader_iter)
-        nvtx.range_pop()
-
-        nvtx.range_push("h2d")
         x = x.to(device, non_blocking=True)
         y = y.to(device, non_blocking=True)
-        nvtx.range_pop()
-
-        nvtx.range_push("forward")
         logits = model(x)
         loss = loss_fn(logits, y)
-        nvtx.range_pop()
-
-        nvtx.range_push("backward")
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
-        nvtx.range_pop()
-
-        nvtx.range_push("step_opt")
         optimizer.step()
-        nvtx.range_pop()
-
-        nvtx.range_pop()  # step
 
         torch.cuda.synchronize()
         step_times.append(time.perf_counter() - t0)
-
-        if profiler_ctx is not None:
-            profiler_ctx.step()
-
-    if profiler_ctx is not None:
-        profiler_ctx.__exit__(None, None, None)
 
     timed = step_times[WARMUP_ITERS:]
     mean_ms = 1000 * sum(timed) / len(timed)
@@ -140,7 +93,4 @@ def train(profile: bool):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--profile", action="store_true")
-    args = parser.parse_args()
-    train(profile=args.profile)
+    train()
