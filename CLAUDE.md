@@ -142,6 +142,16 @@ nvtx.range_push("training_step")
 nvtx.range_pop()
 ```
 
+### Notebook Editing Guidelines
+
+**Cell source format**: The nbformat spec requires cell `source` fields to be arrays of strings (one per line with `\n` at the end of each line except the last), not plain strings. When editing notebooks:
+- Use the Read tool to view notebooks before editing
+- Use the Edit tool for surgical changes to existing cell content
+- Avoid using NotebookEdit to create cells with multi-line content (it may produce string sources)
+- After editing, validate with: `python -c "import nbformat; nbformat.validate(nbformat.read('notebook.ipynb', 4))"`
+
+**GitHub rendering**: GitHub's notebook renderer is strict about nbformat compliance. A malformed cell in any notebook can cause rendering failures.
+
 ### Known Issues
 
 **"Invalid device ordinal" error**: Occurs when Slurm allocates all 8 GPUs from a single node instead of distributing across 2 nodes (4 GPUs each). This is relevant to the original cluster setup but should not occur in single-node porting.
