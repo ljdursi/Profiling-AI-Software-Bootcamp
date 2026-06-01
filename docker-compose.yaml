@@ -1,26 +1,13 @@
 services:
   jupyter:
     image: nvcr.io/nvidia/pytorch:26.02-py3
-    # Host networking so jupyter-server-proxy's /proxy/<port>/ route (which always
-    # targets 127.0.0.1) can reach the Nsight Streamer sibling container, whose
-    # ports are published on the host. JupyterLab still listens on host :8888 for
-    # the Brev proxy. (With host networking, an explicit `ports:` block is invalid.)
-    network_mode: host
+    ports:
+      - "8888:8888"
+      - "8889:8889"
     volumes:
       - type: bind
         source: ../Profiling-AI-Software-Bootcamp/workspace
         target: /workspace
-      # Lets jupyterlab-nvidia-nsight reach the host Docker daemon so it can
-      # spawn the Nsight Streamer sibling container when a report is opened.
-      - type: bind
-        source: /var/run/docker.sock
-        target: /var/run/docker.sock
-      # Bakes proxyDomain=proxy (and other Nsight UI defaults) so the streamer is
-      # reached through the JupyterLab URL Brev already exposes, with no extra ports.
-      - type: bind
-        source: ../Profiling-AI-Software-Bootcamp/config/nsight-overrides.json
-        target: /usr/local/share/jupyter/lab/settings/overrides.json
-        read_only: true
     environment:
       - NVIDIA_DRIVER_CAPABILITIES=all
     cap_add:
@@ -38,7 +25,7 @@ services:
     shm_size: '2gb'
     ipc: host
     command: >
-      sh -c "pip install gdown jupyterlab-nvidia-nsight jupyter-server-proxy torch_tb_profiler nvtx &&
+      sh -c "pip install gdown jupyterlab-nvidia-nsight torch_tb_profiler nvtx &&
              cd /workspace && python3 ./source_code/download-data.py &&
              cd /workspace/data && unzip -u data-list.zip &&
              cd /workspace/source_code && unzip -u saved_models.zip &&
