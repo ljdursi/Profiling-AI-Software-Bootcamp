@@ -210,6 +210,7 @@ def main():
 
         # FIXED: Moved outside the epoch loop. Cleans up only when training is fully done.
         if dist.is_initialized():
+            dist.barrier()
             dist.destroy_process_group()
         
     except Exception as e:
