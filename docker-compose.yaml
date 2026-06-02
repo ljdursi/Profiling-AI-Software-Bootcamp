@@ -25,7 +25,7 @@ services:
     shm_size: '2gb'
     ipc: host
     command: >
-      sh -c "pip install gdown torch_tb_profiler nvtx &&
+      sh -c "pip install gdown torch_tb_profiler nvtx ipywidgets plotly &&
              cd /workspace && python3 ./source_code/download-data.py &&
              cd /workspace/data && unzip -u data-list.zip &&
              cd /workspace/source_code && unzip -u saved_models.zip &&
