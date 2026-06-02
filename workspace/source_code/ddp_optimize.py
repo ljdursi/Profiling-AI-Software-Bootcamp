@@ -1,4 +1,4 @@
-i# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -218,4 +218,5 @@ def main():
             dist.destroy_process_group()
 
 if __name__ == "__main__":
+    # Remove the sleep loop wrapper; let torchrun handle execution lifetime
     main()
